@@ -1,0 +1,11 @@
+{
+  "Version": 1,
+  "Hash": "zt/PmPXD4lSwYMqGBcrsdcUBLXIDQ+qj0bDWor1YunI=",
+  "Source": "AzureImageFileProcessing",
+  "BasePath": "_content/AzureImageFileProcessing",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [],
+  "Assets": []
+}
