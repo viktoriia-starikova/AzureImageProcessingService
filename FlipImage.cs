@@ -1,18 +1,13 @@
 using System;
 using System.IO;
-using System.Net;
 using System.Threading.Tasks;
 using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Azure.Cosmos;
-using Azure.Messaging.ServiceBus;
-using Microsoft.Azure.Amqp.Framing;
 using System.Drawing;
-using System.Security.Cryptography;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -20,20 +15,25 @@ namespace ImageProcessingService
 {
     public class FlipImage
     {
-        private Container container;
+        private Container _container;
 
         // The Cosmos client instance
-        private CosmosClient cosmosClient;
+        private CosmosClient _cosmosClient;
+        private Database _database;
 
-        // The database we will create
-        private Database database;
+        // Blob Storage
+        private const string DATABASE_ID = "Images";
+        private const string CONTAINER_ID = "TaskState";
 
-        private readonly string databaseId = "Images";
-        private readonly string containerId = "TaskState";
+        private readonly string COSMOSDB_ENDPOINT = Environment.GetEnvironmentVariable("CosmosDBEndpoint");
+        private readonly string COSMOSDB_KEY = Environment.GetEnvironmentVariable("CosmosDBKey");
+        private readonly string BLOB_CONNECTION_STRING = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
+        private readonly string BLOB_CONTAINER_NAME = Environment.GetEnvironmentVariable("ContainerName");
+        private readonly ILogger<FlipImage> _logger;
 
-        public FlipImage()
+        public FlipImage(ILogger<FlipImage> log)
         {
-            SetUpCosmosClient();
+            _logger = log;
         }
 
         [FunctionName("RotateImg")]
@@ -42,37 +42,36 @@ namespace ImageProcessingService
         {
             try
             {
-                await CreateDatabaseAsync();
-                await CreateContainerAsync();
+                using CosmosClient cosmosClient = await SetUpCosmosClient();
 
                 string taskId = req.GetQueryParameterDictionary()["id"];
                 TaskState task = await GetCosmosDBItemAsync(taskId);
                 await UpdateImageState(task.TaskId, "In progress", string.Empty);
 
                 string url = await RotateImage(task.FileName);
-                var updatedTask = await UpdateImageState(task.TaskId, "Done", url);
+                TaskState updatedTask = await UpdateImageState(task.TaskId, "Done", url);
                 return updatedTask.ProcessedFilePath;
             }
             catch (Exception ex)
             {
-                throw ex;
+                _logger.LogError(ex.Message, ex);
+                throw;
             }
         }
 
-        private void SetUpCosmosClient()
+        private async Task<CosmosClient> SetUpCosmosClient()
         {
-            string CosmosDBEndpoint = Environment.GetEnvironmentVariable("CosmosDBEndpoint");
-            string CosmosDBKey = Environment.GetEnvironmentVariable("CosmosDBKey");
+            _cosmosClient = new CosmosClient(COSMOSDB_ENDPOINT, COSMOSDB_KEY, new CosmosClientOptions() { ApplicationName = "CosmosDBDotnetQuickstart" });
 
-            this.cosmosClient = new CosmosClient(CosmosDBEndpoint, CosmosDBKey, new CosmosClientOptions() { ApplicationName = "CosmosDBDotnetQuickstart" });
+            await CreateDatabaseAsync();
+            await CreateContainerAsync();
+
+            return _cosmosClient;
         }
 
         private BlobContainerClient GetBlobContainer()
         {
-            string connection = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-            string containerName = Environment.GetEnvironmentVariable("ContainerName");
-
-            return new BlobContainerClient(connection, containerName);
+            return new BlobContainerClient(BLOB_CONNECTION_STRING, BLOB_CONTAINER_NAME);
         }
 
         private async Task<string> RotateImage(string fileName)
@@ -87,16 +86,15 @@ namespace ImageProcessingService
             var extension = fileName[(fileName.LastIndexOf('.') + 1)..];
             var name = fileName[..fileName.LastIndexOf('.')];
             var newFileName = name + "_flipped." + extension;
-            
-            BlobClient newBlobClient = blobContainer.GetBlobClient(newFileName);
-            using (Image image = Image.FromFile(filePath))
-            {
-                filePath = Path.Combine(tempPath, newFileName);
-                image.RotateFlip(RotateFlipType.Rotate180FlipNone);
-                image.Save(filePath);
 
-                await newBlobClient.UploadAsync(filePath);
-            }
+            BlobClient newBlobClient = blobContainer.GetBlobClient(newFileName);
+
+            using Image image = Image.FromFile(filePath);
+            filePath = Path.Combine(tempPath, newFileName);
+            image.RotateFlip(RotateFlipType.Rotate180FlipNone);
+            image.Save(filePath);
+
+            await newBlobClient.UploadAsync(filePath);
 
             return newBlobClient.Uri.ToString();
         }
@@ -105,10 +103,10 @@ namespace ImageProcessingService
         {
             var sqlQueryText = $"SELECT * FROM c WHERE c.id = '{id}'";
 
-            Console.WriteLine("Running query: {0}\n", sqlQueryText);
+            _logger.LogInformation("Running query: {0}\n", sqlQueryText);
 
             QueryDefinition queryDefinition = new QueryDefinition(sqlQueryText);
-            FeedIterator<TaskState> queryResultSetIterator = this.container.GetItemQueryIterator<TaskState>(queryDefinition);
+            FeedIterator<TaskState> queryResultSetIterator = _container.GetItemQueryIterator<TaskState>(queryDefinition);
 
             List<TaskState> tasks = new List<TaskState>();
 
@@ -118,29 +116,30 @@ namespace ImageProcessingService
                 foreach (TaskState task in currentResultSet)
                 {
                     tasks.Add(task);
-                    Console.WriteLine("\tRead {0}\n", task);
+                    _logger.LogInformation("\tRead {0}\n", task);
                 }
             }
+
             return tasks.First();
         }
 
         private async Task CreateDatabaseAsync()
         {
             // Create a new database
-            this.database = await this.cosmosClient.CreateDatabaseIfNotExistsAsync(databaseId);
-            Console.WriteLine("Created Database: {0}\n", this.database.Id);
+            _database = await _cosmosClient.CreateDatabaseIfNotExistsAsync(DATABASE_ID);
+            _logger.LogInformation($"Created Database: {_database.Id}\n");
         }
 
         private async Task CreateContainerAsync()
         {
             // Create a new container
-            this.container = await this.database.CreateContainerIfNotExistsAsync(containerId, "/id");
-            Console.WriteLine("Created Container: {0}\n", this.container.Id);
+            _container = await _database.CreateContainerIfNotExistsAsync(CONTAINER_ID, "/id");
+            _logger.LogInformation($"Created Container: {_container.Id}\n");
         }
 
         private async Task<TaskState> UpdateImageState(string id, string state, string url)
         {
-            ItemResponse<TaskState> response = await container.PatchItemAsync<TaskState>(
+            ItemResponse<TaskState> response = await _container.PatchItemAsync<TaskState>(
                 id: id,
                 partitionKey: new PartitionKey(id),
                 patchOperations: new[] {
