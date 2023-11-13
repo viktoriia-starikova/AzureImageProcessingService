@@ -10,6 +10,7 @@ using Microsoft.Azure.Cosmos;
 using System.Drawing;
 using System.Collections.Generic;
 using System.Linq;
+using SkiaSharp;
 
 namespace ImageProcessingService
 {
@@ -89,14 +90,31 @@ namespace ImageProcessingService
 
             BlobClient newBlobClient = blobContainer.GetBlobClient(newFileName);
 
-            using Image image = Image.FromFile(filePath);
-            filePath = Path.Combine(tempPath, newFileName);
-            image.RotateFlip(RotateFlipType.Rotate180FlipNone);
-            image.Save(filePath);
+            using (var stream = File.OpenRead(filePath))
+            using (var originalBitmap = SKBitmap.Decode(stream))
+            {
+                var flippedBitmap = FlipImageSk(originalBitmap);
+                filePath = Path.Combine(tempPath, newFileName);
+                using var outputStream = File.Create(filePath);
+                flippedBitmap.Encode(SKEncodedImageFormat.Jpeg, 100).SaveTo(outputStream);
+            }
 
             await newBlobClient.UploadAsync(filePath);
-
             return newBlobClient.Uri.ToString();
+        }
+
+        static SKBitmap FlipImageSk(SKBitmap originalBitmap)
+        {
+            var flippedBitmap = new SKBitmap(originalBitmap.Info);
+
+            using (var canvas = new SKCanvas(flippedBitmap))
+            {
+                    canvas.Scale(-1, 1, originalBitmap.Width / 2f, 0);
+
+                canvas.DrawBitmap(originalBitmap, 0, 0);
+            }
+
+            return flippedBitmap;
         }
 
         private async Task<TaskState> GetCosmosDBItemAsync(string id)
